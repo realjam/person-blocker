@@ -1,0 +1,12 @@
+{
+  "stages": {
+    "dev": {
+      "api_gateway_stage": "api",
+      "environment_variables": {
+        "ACCESS_TOKEN": "<YOUR_FB_ACCESS_TOKEN>"
+      }
+    }
+  },
+  "version": "1.0",
+  "app_name": "humanblocker"
+}

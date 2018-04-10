@@ -1,0 +1,39 @@
+{
+  "Statement": [
+    {
+      "Sid": "04fb8afee00d495a800c4cc716de2d8f",
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:GetObject",
+        "s3:GetObjectAcl",
+        "s3:DeleteObject"
+      ]
+    },
+    {
+      "Sid": "6980a9c7602848d5b5ca4b3492ac9758",
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:SendMessage"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:*:*:*",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ]
+    }
+  ],
+  "Version": "2012-10-17"
+}
