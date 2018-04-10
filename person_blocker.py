@@ -1,18 +1,23 @@
 import os
-import sys
-import argparse
-import numpy as np
-import coco
-import utils
-import model as modellib
-from classes import get_class_names, InferenceConfig
-from ast import literal_eval as make_tuple
-import imageio
-import visualize
+import time
 
-# Creates a color layer and adds Gaussian noise.
-# For each pixel, the same noise value is added to each channel
-# to mitigate hue shfting.
+import boto3
+import botocore
+import imageio
+import numpy as np
+import requests
+
+import model as modellib
+import utils
+from classes import get_class_names, InferenceConfig
+
+s3 = boto3.client('s3')
+
+# Read FB Token from environment variable
+ACCESS_TOKEN = os.environ['ACCESS_TOKEN']
+
+#  Get bucket name. Bucket must be in US N.virginia region otherwise facebook complain if they found '-' in url
+BUCKET = os.environ['BUCKET_NAME']
 
 
 def create_noisy_color(image, color):
@@ -25,30 +30,49 @@ def create_noisy_color(image, color):
     return mask_noise
 
 
-# Helper function to allow both RGB triplet + hex CL input
+# Send Text message to Sender
+def send_to_fb_text(receiver_id: int, text):
+    FB_URL = 'https://graph.facebook.com/v2.10/me/messages?access_token=' + ACCESS_TOKEN
+    payload = {
+        "recipient": {
+            "id": str(receiver_id)
+        },
+        "message": {
+            "text": text[:640]
+        }
+    }
 
-def string_to_rgb_triplet(triplet):
-
-    if '#' in triplet:
-        # http://stackoverflow.com/a/4296727
-        triplet = triplet.lstrip('#')
-        _NUMERALS = '0123456789abcdefABCDEF'
-        _HEXDEC = {v: int(v, 16)
-                   for v in (x + y for x in _NUMERALS for y in _NUMERALS)}
-        return (_HEXDEC[triplet[0:2]], _HEXDEC[triplet[2:4]],
-                _HEXDEC[triplet[4:6]])
-
-    else:
-        # https://stackoverflow.com/a/9763133
-        triplet = make_tuple(triplet)
-        return triplet
+    if len(text) > 0:
+        resp = requests.post(FB_URL, json=payload)
+        print(resp.content)
+        if len(text) > 640:
+            send_to_fb_text(receiver_id, text[640:])
 
 
-def person_blocker(args):
+# Reply the generated image to sender
+def send_to_fb(receiver_id, file_url):
+    FB_URL = 'https://graph.facebook.com/v2.12/me/messages?access_token=' + ACCESS_TOKEN
+    payload = {
+        "recipient": {
+            "id": str(receiver_id)
+        },
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {
+                    "is_reusable": False,
+                    "url": file_url
+                }
+            }
+        }
+    }
+    resp = requests.post(FB_URL, json=payload)
+    print(resp.json())
 
-    # Required to load model, but otherwise unused
+
+def load_model():
     ROOT_DIR = os.getcwd()
-    COCO_MODEL_PATH = args.model or os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
+    COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
 
     MODEL_DIR = os.path.join(ROOT_DIR, "logs")  # Required to load model
 
@@ -61,22 +85,23 @@ def person_blocker(args):
                               model_dir=MODEL_DIR, config=config)
     model.load_weights(COCO_MODEL_PATH, by_name=True)
 
-    image = imageio.imread(args.image)
+    return model
+
+
+# Load model only for one time
+model = load_model()
+
+
+# Required to load model, but otherwise unused
+def person_blocker(image_path, sender_id):
+    image = imageio.imread(image_path)
 
     # Create masks for all objects
     results = model.detect([image], verbose=0)
     r = results[0]
 
-    if args.labeled:
-        position_ids = ['[{}]'.format(x)
-                        for x in range(r['class_ids'].shape[0])]
-        visualize.display_instances(image, r['rois'],
-                                    r['masks'], r['class_ids'],
-                                    get_class_names(), position_ids)
-        sys.exit()
-
     # Filter masks to only the selected objects
-    objects = np.array(args.objects)
+    objects = np.array('person')
 
     # Object IDs:
     if np.all(np.chararray.isnumeric(objects)):
@@ -90,59 +115,63 @@ def person_blocker(args):
 
     mask_selected = np.sum(r['masks'][:, :, object_indices], axis=2)
 
-    # Replace object masks with noise
-    mask_color = string_to_rgb_triplet(args.color)
+    # Replace object masks with white noise
+    mask_color = (255, 255, 255)
     image_masked = image.copy()
     noisy_color = create_noisy_color(image, mask_color)
     image_masked[mask_selected > 0] = noisy_color[mask_selected > 0]
 
-    imageio.imwrite('person_blocked.png', image_masked)
+    dest = "/tmp/{0}".format(image_path.split("/")[-1])
+    imageio.imwrite(dest, image_masked)
+    key = "fb/processed/{0}".format(sender_id + dest)
 
-    # Create GIF. The noise will be random for each frame,
-    # which creates a "static" effect
+    # Upload image to S3 as the FB need URL to send image in messages
+    response = s3.put_object(
+        ACL='public-read',
+        Body=open(dest, 'rb').read(),
+        Bucket=BUCKET,
+        ContentType="image/png",
+        Key=key,
+    )
 
-    images = [image_masked]
-    num_images = 10   # should be a divisor of 30
-
-    for _ in range(num_images - 1):
-        new_image = image.copy()
-        noisy_color = create_noisy_color(image, mask_color)
-        new_image[mask_selected > 0] = noisy_color[mask_selected > 0]
-        images.append(new_image)
-
-    imageio.mimsave('person_blocked.gif', images, fps=30., subrectangles=True)
+    file_url = "https://s3.amazonaws.com/{0}/{1}".format(BUCKET, key)
+    print(file_url)
+    send_to_fb(sender_id, file_url)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Person Blocker - Automatically "block" people '
-                    'in images using a neural network.')
-    parser.add_argument('-i', '--image',  help='Image file name.',
-                        required=False)
-    parser.add_argument(
-        '-m', '--model',  help='path to COCO model', default=None)
-    parser.add_argument('-o',
-                        '--objects', nargs='+',
-                        help='object(s)/object ID(s) to block. ' +
-                        'Use the -names flag to print a list of ' +
-                        'valid objects',
-                        default='person')
-    parser.add_argument('-c',
-                        '--color', nargs='?', default='(255, 255, 255)',
-                        help='color of the "block"')
-    parser.add_argument('-l',
-                        '--labeled', dest='labeled',
-                        action='store_true',
-                        help='generate labeled image instead')
-    parser.add_argument('-n',
-                        '--names', dest='names',
-                        action='store_true',
-                        help='prints class names and exits.')
-    parser.set_defaults(labeled=False, names=False)
-    args = parser.parse_args()
+if __name__ == "__main__":
+    sqs = boto3.client('sqs')
+    # Create SQS queue same name as used in lambda or get url of queue
+    queue_url = sqs.create_queue(
+        QueueName='tensor-flow.fifo',
+        Attributes={
+            'FifoQueue': 'true'
+        }
+    )['QueueUrl']
 
-    if args.names:
-        print(get_class_names())
-        sys.exit()
-
-    person_blocker(args)
+    while True:
+        try:
+            sender_id = None
+            # Poll the SQS queue
+            messages = sqs.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=10
+            )
+            print(messages)
+            print(time.time())
+            if 'Messages' in messages:
+                for message in messages['Messages']:
+                    print(message['Body'])
+                    #  Delete the message from queue
+                    sqs.delete_message(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=message['ReceiptHandle']
+                    )
+                    # Extract sender id from image URL
+                    image_path = message['Body']
+                    sender_id = image_path.split("/")[-2]
+                    person_blocker(image_path, sender_id)
+        except (botocore.exceptions.ClientError, Exception) as e:
+            print("error", e)
+            if sender_id is not None and len(sender_id) > 5:
+                send_to_fb_text(sender_id, "Got an error:{0}".format(e))

@@ -5,3 +5,7 @@ keras
 scipy
 scikit-image
 tensorflow
+boto3
+numpy
+requests
+chalice
